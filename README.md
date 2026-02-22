@@ -19,7 +19,10 @@ Generate and edit images directly in ComfyUI using Google Gemini, xAI Grok, Open
 - **5 AI Providers** — Gemini, Grok, OpenAI-compatible, Qwen, and GLM in one plugin
 - **Text-to-Image** — Generate images from text prompts with all providers
 - **Image Editing** — Edit existing images with reference inputs (Gemini, Grok, OpenAI, Qwen)
+- **Flexible Image Input** — Batch `ref_images` + 3 individual `image1`/`image2`/`image3` slots per node
 - **Inpainting** — Mask-based inpainting support (Gemini, Grok, OpenAI, Qwen)
+- **Smart Image Encoding** — JPEG compression to prevent payload bloat (see [Image Encoding](#image-encoding))
+- **Token Usage Tracking** — Token consumption logged in console for all providers
 - **Persistent Configuration** — API keys and settings saved across sessions in `api_config.json`
 - **Custom Models** — Dynamically add/remove models through Config nodes
 - **Batch Generation** — Generate up to 4 images per request
@@ -52,7 +55,7 @@ Search for **"API Image Generator"** in ComfyUI Manager and install.
 
 ```bash
 cd ComfyUI/custom_nodes
-git clone https://github.com/YOUR_USERNAME/comfyui-apiimage.git
+git clone https://github.com/AyinMostima/ComfyUI-APIimage.git
 ```
 
 Dependencies are auto-installed on first load. To install manually:
@@ -116,10 +119,37 @@ Simply enter a prompt and your API key. Select model and optional parameters:
 
 ### Image Editing with References
 
-Connect an image to the `ref_images` input to enter editing mode:
+Every generation node provides **two ways** to supply reference images:
+
+| Input        | Type          | Description                                                                                    |
+| ------------ | ------------- | ---------------------------------------------------------------------------------------------- |
+| `ref_images` | IMAGE (batch) | Standard ComfyUI batch — connect a **Batch Images** node to pass multiple images as one tensor |
+| `image1`     | IMAGE         | Individual image slot #1 — connect a **Load Image** node directly                              |
+| `image2`     | IMAGE         | Individual image slot #2                                                                       |
+| `image3`     | IMAGE         | Individual image slot #3                                                                       |
+
+All inputs are merged: `ref_images` batch + `image1` + `image2` + `image3`, in that order.
+
+#### Why use individual slots instead of batch?
+
+> **IMPORTANT:** ComfyUI’s **Batch Images** node requires all images to have the **same resolution**. If your images have different sizes (e.g., 1390×1800 and 1024×1024), one will be **forcibly resized** to match the other. This distortion can trigger API content moderation errors (e.g., `PROHIBITED_CONTENT` on Gemini).
+>
+> Using `image1`/`image2`/`image3` keeps each image at its **original resolution** — no resizing, no distortion.
+
+#### Example: Individual image inputs
 
 ```
-[Load Image] --> ref_images --> [Gemini Image Generate] --> [Preview Image]
+[Load Image A] --> image1 --+
+[Load Image B] --> image2 --+--> [Gemini Image Generate] --> [Preview Image]
+                  prompt ---+
+```
+
+#### Example: Batch input (same-size images only)
+
+```
+[Load Image A] --+
+                 +--> [Batch Images] --> ref_images --> [Gemini Image Generate]
+[Load Image B] --+
 ```
 
 **Reference image limits per model:**
@@ -133,15 +163,47 @@ Connect an image to the `ref_images` input to enter editing mode:
 | `dall-e-2`                                      | 1              |
 | `qwen-image-edit`                               | 3 (min 1)      |
 
+> All limits apply to the **total combined count** from `ref_images` + `image1-3`. Exceeding the limit triggers a warning and truncation.
+
 ### Inpainting
 
-Connect both `ref_images` and `mask` inputs:
+Connect both a reference image and `mask` input:
 
 ```
-[Load Image] ----> ref_images --+
-                                +--> [Generate Node] --> [Preview Image]
-[Mask Editor] ---> mask --------+
+[Load Image] ----> image1 ------+
+                                 +--> [Generate Node] --> [Preview Image]
+[Mask Editor] ---> mask ---------+
 ```
+
+### Image Encoding
+
+All reference images are automatically encoded as **JPEG (quality 95)** before transmission to reduce payload size:
+
+| Without optimization  | With optimization            | Savings         |
+| --------------------- | ---------------------------- | --------------- |
+| ~7 MB per image (PNG) | ~500 KB per image (JPEG q95) | **93% smaller** |
+
+This prevents:
+
+- Exceeding API payload limits (Gemini 20MB, Grok 10-20MB)
+- Timeout errors from large uploads
+- Base64 string bloat (~9.5MB per PNG vs ~700KB per JPEG)
+
+**Exceptions:**
+
+- **Masks** (Grok/OpenAI) remain PNG for lossless encoding
+- **OpenAI inpainting** uses PNG as required by the API spec (RGBA alpha channel)
+
+### Token Usage Tracking
+
+All nodes log token consumption to the ComfyUI console after each generation:
+
+```
+[Gemini] Token usage | Attempt: official-primary | Prompt: 1856 | Output: 4231 | Total: 6087
+[Gemini] Success | Model: gemini-3-pro-image-preview | Images: 1 | Tokens(prompt/output/total): 1856/4231/6087
+```
+
+> Note: Some image generation APIs may not return token usage data (displayed as `N/A`).
 
 ### Persistent Configuration
 

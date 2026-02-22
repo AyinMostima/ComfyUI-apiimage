@@ -93,6 +93,9 @@ class GLMImageGenerate:
                     "placeholder": "https://open.bigmodel.cn/api"
                 }),
                 "ref_images": ("IMAGE",),
+                "image1": ("IMAGE",),
+                "image2": ("IMAGE",),
+                "image3": ("IMAGE",),
                 "custom_model": ("STRING", {
                     "default": "",
                     "placeholder": "Leave empty to use dropdown; fill to override"
@@ -110,7 +113,9 @@ class GLMImageGenerate:
         return float("NaN")
 
     def generate(self, prompt, api_key, model_name, quality, size, num_images=1,
-                 base_url="", ref_images=None, custom_model="", seed=0):
+                 base_url="", ref_images=None,
+                 image1=None, image2=None, image3=None,
+                 custom_model="", seed=0):
         """
         Main execution function for GLM image generation.
 
@@ -140,7 +145,8 @@ class GLMImageGenerate:
         effective_model = custom_model.strip() if custom_model and custom_model.strip() else model_name
 
         # --- Validate ref_images compatibility ---
-        validate_ref_images("GLM", effective_model, ref_images, MODEL_REF_IMAGE_LIMITS)
+        extra_img_count = sum(1 for s in [image1, image2, image3] if s is not None)
+        validate_ref_images("GLM", effective_model, ref_images, MODEL_REF_IMAGE_LIMITS, extra_count=extra_img_count)
 
         effective_url = sanitize_url(base_url) or "https://open.bigmodel.cn/api"
 
@@ -152,11 +158,21 @@ class GLMImageGenerate:
 
         # --- Generate (loop for multi-image) ---
         all_images_data = []
+        total_prompt_tokens = 0
+        total_completion_tokens = 0
+        total_all_tokens = 0
         for gen_idx in range(num_images):
-            images_data = self._call_api(
+            images_data, usage = self._call_api(
                 effective_url, api_key, effective_model, prompt, quality, size
             )
             all_images_data.extend(images_data)
+
+            # Accumulate token usage from each API call
+            if usage:
+                total_prompt_tokens += usage.get("prompt_tokens", 0) or 0
+                total_completion_tokens += usage.get("completion_tokens", 0) or 0
+                total_all_tokens += usage.get("total_tokens", 0) or 0
+
             if gen_idx < num_images - 1:
                 logger.info(f"[GLM] Generated image {gen_idx+1}/{num_images}")
 
@@ -166,15 +182,21 @@ class GLMImageGenerate:
             )
 
         result_tensor = bytes_to_tensor(all_images_data)
+
+        # Log token usage
+        usage_str = "N/A"
+        if total_all_tokens > 0:
+            usage_str = f"Prompt: {total_prompt_tokens} | Completion: {total_completion_tokens} | Total: {total_all_tokens}"
         logger.info(
             f"[GLM] Success | Model: {effective_model} | "
-            f"Images: {result_tensor.shape[0]} | Size: {result_tensor.shape[1]}x{result_tensor.shape[2]}"
+            f"Images: {result_tensor.shape[0]} | Size: {result_tensor.shape[1]}x{result_tensor.shape[2]} | "
+            f"Tokens: {usage_str}"
         )
 
         return (result_tensor,)
 
     def _call_api(self, base_url, api_key, model, prompt, quality, size):
-        """Make a single API call and return list of image bytes."""
+        """Make a single API call and return (list of image bytes, usage dict)."""
         url = f"{base_url}/paas/v4/images/generations"
         headers = {
             "Content-Type": "application/json",
@@ -233,6 +255,9 @@ class GLMImageGenerate:
                 f"[APIImage GLM] Invalid JSON response from server."
             )
 
+        # Extract usage from response
+        usage = json_response.get("usage", {})
+
         images_data = []
         data_list = json_response.get("data") or []
 
@@ -272,4 +297,4 @@ class GLMImageGenerate:
                 f"Response: {str(json_response)[:500]}"
             )
 
-        return images_data
+        return images_data, usage

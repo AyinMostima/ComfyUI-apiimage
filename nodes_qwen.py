@@ -91,6 +91,9 @@ class QwenImageGenerate:
                     "placeholder": "CN: dashscope.aliyuncs.com | Intl: dashscope-intl.aliyuncs.com"
                 }),
                 "ref_images": ("IMAGE",),
+                "image1": ("IMAGE",),
+                "image2": ("IMAGE",),
+                "image3": ("IMAGE",),
                 "mask": ("MASK",),
                 "negative_prompt": ("STRING", {
                     "default": "",
@@ -121,25 +124,29 @@ class QwenImageGenerate:
 
     def _upload_image_and_get_url(self, pil_img):
         """
-        Convert PIL image to a temporary base64 data URI for DashScope.
+        Convert PIL image to a temporary JPEG file for DashScope.
         DashScope accepts both URLs and local file paths.
         We save to a temp file and return the path.
+        Uses JPEG to avoid PNG bloat (~7MB vs ~500KB for large images).
         """
         import tempfile
         import os
 
         buf = io.BytesIO()
-        pil_img.save(buf, format="PNG")
+        # Use JPEG to reduce file size
+        # PNG would be ~7MB for large images; JPEG q95 is ~500KB
+        pil_img.save(buf, format="JPEG", quality=95)
         buf.seek(0)
 
         # Save to temp file (DashScope SDK can read local file paths)
-        tmp = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
+        tmp = tempfile.NamedTemporaryFile(suffix=".jpg", delete=False)
         tmp.write(buf.getvalue())
         tmp.close()
         return tmp.name
 
     def generate(self, prompt, api_key, model_name, size, num_images=1,
                  base_url="", ref_images=None,
+                 image1=None, image2=None, image3=None,
                  mask=None,
                  negative_prompt="", watermark=False, prompt_extend=True,
                  custom_model="", seed=0):
@@ -174,7 +181,8 @@ class QwenImageGenerate:
         effective_model = custom_model.strip() if custom_model and custom_model.strip() else model_name
 
         # --- Validate ref_images compatibility ---
-        validate_ref_images("Qwen", effective_model, ref_images, MODEL_REF_IMAGE_LIMITS)
+        extra_img_count = sum(1 for s in [image1, image2, image3] if s is not None)
+        validate_ref_images("Qwen", effective_model, ref_images, MODEL_REF_IMAGE_LIMITS, extra_count=extra_img_count)
 
         logger.info(
             f"[Qwen] Starting generation | Model: {effective_model} | "
@@ -215,6 +223,20 @@ class QwenImageGenerate:
                     logger.info(f"[Qwen] Added ref image {bidx+1}/{len(batch_pils)}: {tmp_path}")
             except Exception as e:
                 logger.warning(f"[Qwen] Failed to process ref_images: {e}")
+
+        # Process individual image slots (image1-3)
+        for slot_name, slot_val in [("image1", image1), ("image2", image2), ("image3", image3)]:
+            if slot_val is not None:
+                try:
+                    slot_pils = tensor_to_pil(slot_val)
+                    for sidx, simg in enumerate(slot_pils):
+                        tmp_path = self._upload_image_and_get_url(simg)
+                        temp_files.append(tmp_path)
+                        content.append({"image": f"file://{tmp_path}"})
+                        ref_count += 1
+                        logger.info(f"[Qwen] Added {slot_name} image {sidx+1}: {tmp_path}")
+                except Exception as e:
+                    logger.warning(f"[Qwen] Failed to process {slot_name}: {e}")
 
         if ref_count > 0:
             logger.info(f"[Qwen] Total reference images: {ref_count}")
@@ -343,9 +365,28 @@ class QwenImageGenerate:
             )
 
         result_tensor = bytes_to_tensor(all_images_data)
+
+        # Extract token usage from DashScope response
+        # DashScope response.usage contains: input_tokens, output_tokens, image_tokens
+        usage_str = "N/A"
+        try:
+            if hasattr(response, 'usage') and response.usage:
+                u = response.usage
+                input_t = getattr(u, 'input_tokens', 0) or 0
+                output_t = getattr(u, 'output_tokens', 0) or 0
+                image_t = getattr(u, 'image_tokens', 0) or 0
+                # Multiply by num_images for total estimate
+                usage_str = (
+                    f"Input: {input_t * num_images} | Output: {output_t * num_images} | "
+                    f"Image: {image_t * num_images}"
+                )
+        except Exception:
+            pass
+
         logger.info(
             f"[Qwen] Success | Model: {effective_model} | "
-            f"Images: {result_tensor.shape[0]} | Size: {result_tensor.shape[1]}x{result_tensor.shape[2]}"
+            f"Images: {result_tensor.shape[0]} | Size: {result_tensor.shape[1]}x{result_tensor.shape[2]} | "
+            f"Tokens: {usage_str}"
         )
 
         return (result_tensor, text_response,)

@@ -95,6 +95,9 @@ class OpenAIImageGenerate:
                     "default": "auto"
                 }),
                 "ref_images": ("IMAGE",),
+                "image1": ("IMAGE",),
+                "image2": ("IMAGE",),
+                "image3": ("IMAGE",),
                 "mask": ("MASK",),
                 "custom_model": ("STRING", {
                     "default": "",
@@ -113,7 +116,9 @@ class OpenAIImageGenerate:
         return float("NaN")
 
     def generate(self, prompt, api_key, base_url, model_name, size, num_images=1,
-                 quality="auto", ref_images=None, mask=None, custom_model="", seed=0):
+                 quality="auto", ref_images=None,
+                 image1=None, image2=None, image3=None,
+                 mask=None, custom_model="", seed=0):
         """
         Main execution function for OpenAI-compatible image generation.
 
@@ -149,7 +154,8 @@ class OpenAIImageGenerate:
         clean_url = sanitize_url(base_url) or "https://api.openai.com"
 
         # --- Validate ref_images compatibility ---
-        validate_ref_images("OpenAI", effective_model, ref_images, MODEL_REF_IMAGE_LIMITS)
+        extra_img_count = sum(1 for s in [image1, image2, image3] if s is not None)
+        validate_ref_images("OpenAI", effective_model, ref_images, MODEL_REF_IMAGE_LIMITS, extra_count=extra_img_count)
 
         logger.info(
             f"[OpenAI] Starting generation | URL: {clean_url} | "
@@ -169,6 +175,19 @@ class OpenAIImageGenerate:
                     )
                 else:
                     image = pil_to_tensor([ref_pils[0]])
+
+        # Check individual image slots (image1-3) as fallback if no ref_images
+        if image is None and mask is not None:
+            for slot_name, slot_val in [("image1", image1), ("image2", image2), ("image3", image3)]:
+                if slot_val is not None:
+                    try:
+                        slot_pils = tensor_to_pil(slot_val)
+                        if slot_pils:
+                            image = pil_to_tensor([slot_pils[0]])
+                            logger.info(f"[OpenAI] Using {slot_name} as inpaint source")
+                            break
+                    except Exception as e:
+                        logger.warning(f"[OpenAI] Failed to process {slot_name}: {e}")
 
         # --- Determine mode: generation vs inpainting ---
         is_inpaint = image is not None and mask is not None
@@ -332,9 +351,24 @@ class OpenAIImageGenerate:
 
         # Convert bytes to tensor
         result_tensor = bytes_to_tensor(images_data)
+
+        # Extract token usage from OpenAI response
+        # OpenAI JSON response may contain: usage.prompt_tokens, usage.completion_tokens, usage.total_tokens
+        usage_str = "N/A"
+        try:
+            usage = json_response.get("usage")
+            if usage:
+                prompt_t = usage.get("prompt_tokens", 0)
+                completion_t = usage.get("completion_tokens", 0)
+                total_t = usage.get("total_tokens", 0)
+                usage_str = f"Prompt: {prompt_t} | Completion: {completion_t} | Total: {total_t}"
+        except Exception:
+            pass
+
         logger.info(
             f"[OpenAI] Success | Model: {effective_model} | "
-            f"Images: {result_tensor.shape[0]} | Size: {result_tensor.shape[1]}x{result_tensor.shape[2]}"
+            f"Images: {result_tensor.shape[0]} | Size: {result_tensor.shape[1]}x{result_tensor.shape[2]} | "
+            f"Tokens: {usage_str}"
         )
 
         return (result_tensor,)

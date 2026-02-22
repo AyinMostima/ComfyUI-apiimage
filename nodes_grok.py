@@ -83,6 +83,9 @@ class GrokImageGenerate:
                     "placeholder": "https://api.x.ai (default)"
                 }),
                 "ref_images": ("IMAGE",),
+                "image1": ("IMAGE",),
+                "image2": ("IMAGE",),
+                "image3": ("IMAGE",),
                 "mask": ("MASK",),
                 "custom_model": ("STRING", {
                     "default": "",
@@ -103,6 +106,7 @@ class GrokImageGenerate:
     def generate(self, prompt, api_key, model_name, num_images=1,
                  aspect_ratio="1:1", resolution="1k",
                  base_url="", ref_images=None,
+                 image1=None, image2=None, image3=None,
                  mask=None, custom_model="", seed=0):
         """
         Main execution function for Grok image generation.
@@ -160,20 +164,27 @@ class GrokImageGenerate:
             del os.environ["XAI_API_BASE"]
 
         # --- Validate reference images ---
-        validate_ref_images("Grok", effective_model, ref_images, MODEL_REF_IMAGE_LIMITS)
+        extra_img_count = sum(1 for s in [image1, image2, image3] if s is not None)
+        validate_ref_images("Grok", effective_model, ref_images, MODEL_REF_IMAGE_LIMITS, extra_count=extra_img_count)
 
         # --- Process Reference Image ---
         # Grok API only supports 1 reference image per request
         has_reference = False
         reference_uri = None
 
-        # Collect reference images from ref_images
+        # Collect reference images from ref_images + individual image1-3
         all_ref_pils = []
         if ref_images is not None:
             try:
                 all_ref_pils.extend(tensor_to_pil(ref_images))
             except Exception as e:
                 logger.warning(f"[Grok] Failed to process ref_images: {e}")
+        for slot_name, slot_val in [("image1", image1), ("image2", image2), ("image3", image3)]:
+            if slot_val is not None:
+                try:
+                    all_ref_pils.extend(tensor_to_pil(slot_val))
+                except Exception as e:
+                    logger.warning(f"[Grok] Failed to process {slot_name}: {e}")
 
         if len(all_ref_pils) > 1:
             logger.warning(
@@ -185,11 +196,13 @@ class GrokImageGenerate:
             try:
                 ref_img = all_ref_pils[0]
                 buf = io.BytesIO()
-                ref_img.save(buf, format="PNG")
+                # Use JPEG to reduce payload size
+                # PNG would be ~7MB for large images; JPEG q95 is ~500KB
+                # The base64 data URI becomes ~9.5MB vs ~700KB
+                ref_img.save(buf, format="JPEG", quality=95)
                 img_bytes = buf.getvalue()
                 b64_str = base64.b64encode(img_bytes).decode("utf-8")
-                mime = detect_mime(img_bytes)
-                reference_uri = f"data:{mime};base64,{b64_str}"
+                reference_uri = f"data:image/jpeg;base64,{b64_str}"
                 has_reference = True
                 logger.info(
                     f"[Grok] Reference image prepared | "
@@ -295,9 +308,29 @@ class GrokImageGenerate:
 
         # Convert bytes to tensor
         result_tensor = bytes_to_tensor(images_data)
+
+        # Try to extract token usage from protobuf response or SDK response
+        usage_str = "N/A (xai_sdk does not expose token usage)"
+        try:
+            if has_reference and reference_uri:
+                # Edit mode: protobuf response
+                if hasattr(response_pb, 'usage'):
+                    u = response_pb.usage
+                    prompt_t = getattr(u, 'prompt_tokens', 0)
+                    total_t = getattr(u, 'total_tokens', 0)
+                    usage_str = f"Prompt: {prompt_t} | Total: {total_t}"
+            else:
+                # Generate mode: SDK responses
+                if responses and hasattr(responses[0], 'usage'):
+                    u = responses[0].usage
+                    usage_str = str(u)
+        except Exception:
+            pass
+
         logger.info(
             f"[Grok] Success | Model: {effective_model} | "
-            f"Images: {result_tensor.shape[0]} | Size: {result_tensor.shape[1]}x{result_tensor.shape[2]}"
+            f"Images: {result_tensor.shape[0]} | Size: {result_tensor.shape[1]}x{result_tensor.shape[2]} | "
+            f"Tokens: {usage_str}"
         )
 
         return (result_tensor,)

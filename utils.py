@@ -230,12 +230,12 @@ def sanitize_url(url):
     return cleaned
 
 
-def validate_ref_images(provider, model_name, ref_images, limits_map):
+def validate_ref_images(provider, model_name, ref_images, limits_map, extra_count=0):
     """
     Validate reference images against per-model limits.
 
     Reference: Each provider's API documentation (see per-node limit maps).
-    Calculation: ref_count = batch dimension of IMAGE tensor.
+    Calculation: ref_count = batch dimension of IMAGE tensor + extra_count.
     Parameters:
         provider (str): Provider name for error messages (e.g. "Gemini", "Qwen").
         model_name (str): The effective model name being used.
@@ -245,9 +245,11 @@ def validate_ref_images(provider, model_name, ref_images, limits_map):
             (1, N) means edit model that REQUIRES at least 1 image.
             (0, N) means ref images optional, up to N allowed.
             Missing key means unknown/custom model (warn but allow).
+        extra_count (int): Additional image count from individual slots
+            (image1, image2, image3) not included in ref_images tensor.
 
     Returns:
-        int: Number of reference images (0 if ref_images is None).
+        int: Total number of reference images.
 
     Raises:
         ValueError: If model is text-only and ref_images provided,
@@ -261,6 +263,9 @@ def validate_ref_images(provider, model_name, ref_images, limits_map):
             ref_count = len(ref_pils)
         except Exception as e:
             logger.warning(f"[{provider}] Failed to count ref images: {e}")
+
+    # Add individual image slots (image1-3)
+    ref_count += extra_count
 
     # Look up limit: check exact match first, then substring match
     limit = None
@@ -288,7 +293,7 @@ def validate_ref_images(provider, model_name, ref_images, limits_map):
         raise ValueError(
             f"[APIImage {provider}] Model '{model_name}' is text-to-image only "
             f"and does not support reference images. "
-            f"Please disconnect ref_images input. {alt_text}."
+            f"Please disconnect ref_images/image1-3 inputs. {alt_text}."
         )
 
     if min_required > 0 and ref_count == 0:
@@ -296,7 +301,7 @@ def validate_ref_images(provider, model_name, ref_images, limits_map):
         raise ValueError(
             f"[APIImage {provider}] Model '{model_name}' is an editing model "
             f"that requires {min_required}-{max_allowed} reference image(s), "
-            f"but none were provided. Please connect ref_images input, "
+            f"but none were provided. Please connect ref_images or image1-3 input, "
             f"or switch to a text-to-image model."
         )
 
